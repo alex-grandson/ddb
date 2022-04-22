@@ -7,102 +7,129 @@
 function help() {
   # Display Help
   echo
-  echo "Lab work 1. Author: Kutsenko Aleksei. Variant 712"
-  echo "Possible usage:"
+  echo "Lab work 1. Студент: Куценко Алексей. Вариант 712"
+  echo "Использование:"
   echo
   echo "./run TABLE_NAME"
-  echo "    This will print you info about desirable table for each found table in all accessible schemas"
+  echo "    Команда покажет в каких схемах имеется желаемая таблица"
   echo
   echo "./run SCHEMA_NAME.TABLE_NAME"
   echo "    This will print you info about desirable table in given schema"
   echo
 }
 
-function write_file_to_find_table() {
+function tableinfo_by_tablename() {
   echo "
-  drop function if exists get_info_about_table_by_name(table_name varchar);
-
-  create or replace function get_info_about_table_by_name(table_name varchar)
-      returns table
-              (
-                  №             bigint,
-                  \"Имя столбца\" name,
-                  \"Атрибуты\"   text
-              )
-      language plpgsql as
-  \$func\$
-  BEGIN
-  return query select row_number() over () as №,
-                          columns.attname as \"Имя столбца\",
-                          concat('Type ',': ',pt.typname, ' ', (case columns.attnotnull when false then 'NULL' else 'NOT NULL' end), E'\n', 'Comment ', ': ', pd.description, E'\n', 'Constr ', ': ', (case constraints.consrc when null then 'Empty' else constraints.consrc end), E'\n') as "Атрибуты"
-                   FROM pg_attribute columns
-                            inner join pg_class tables
-                                       on columns.attrelid = tables.oid
-                            inner join pg_type pt
-                                       on columns.atttypid = pt.oid
-                            left join pg_namespace n on n.oid = tables.relnamespace
-                            left join pg_tablespace t on t.oid = tables.reltablespace
-                            left join pg_description pd on (pd.objoid = tables.oid  and pd.objsubid = columns.attnum)
-                            left join pg_constraint constraints
-                                      on constraints.conrelid = columns.attrelid and columns.attnum = any(constraints.conkey)
-                   where tables.relname = table_name and columns.attnum > 0;
-  end;
-  \$func\$;
-  " > .file1.sql
-
-  echo "select * from get_info_about_table_by_name('$1');" > .file2.sql
-
-}
-
-function execute_psql_commands() {
-  psql -U $USER -h pg -d studs -f .file1.sql
-  psql -U $USER -h pg -d studs -f .file2.sql
-}
-function get_schemas_names() {
-  echo "
-  CREATE OR REPLACE FUNCTION schemas_table(t text)
-      RETURNS VOID AS
+  CREATE OR REPLACE FUNCTION get_name_by_oid(oid_number INT)
+  RETURNS TEXT
+  AS
   \$\$
-  DECLARE
-  schema_tab CURSOR FOR (
-          SELECT tab.relname, space.nspname FROM pg_class tab
-                                                     JOIN pg_namespace space on tab.relnamespace = space.oid
-          WHERE (tab.relname = t or (tab.relname = (SELECT SPLIT_PART(t,'.',2))) AND (space.nspname = (SELECT SPLIT_PART(t,'.',1)))) OR ((tab.relname = (SELECT SPLIT_PART(t,'.',3))) and space.nspname = (SELECT SPLIT_PART(t,'.',2)))
-          ORDER BY space.nspname
-      );
-      table_count int;
-  schema text;
-  BEGIN
+      DECLARE
+          tablename TEXT;
+      BEGIN
+          SELECT
+              c.relname AS tablename INTO tablename
+          FROM pg_class c
+                   INNER JOIN pg_namespace n ON (c.relnamespace = n.oid)
+          WHERE c.relfilenode = oid_number;
+          RETURN tablename;
+      END;
+  \$\$ language plpgsql;
 
-  SELECT COUNT(DISTINCT nspname) INTO table_count FROM pg_class tab JOIN pg_namespace space on tab.relnamespace = space.oid WHERE relname = t;
+  DO
+  \$\$
+      DECLARE
+          new_tab CURSOR FOR (
+              SELECT DISTINCT ON (attnum) * FROM (
+             SELECT DISTINCT ON (attname) attnum, attname, typname, description, consrc, conname, confrelid
+             from pg_attribute columns
+                      left join pg_class tables on columns.attrelid = tables.oid
+                      left join pg_type pt on columns.atttypid = pt.oid
+                      left join pg_namespace n on n.oid = tables.relnamespace
+                      left join pg_tablespace t on t.oid = tables.reltablespace
+                      left join pg_description pd on (pd.objoid = tables.oid  and pd.objsubid = columns.attnum)
+                      left join pg_constraint constraints on constraints.conrelid = columns.attrelid and columns.attnum = any(constraints.conkey)
+             WHERE (relname = '$1' or relname = SPLIT_PART('$1','.',2) or relname = SPLIT_PART('$1','.',3)) and attnum > 0
+         ) as Foo
+              ORDER BY attnum
+          );
+      BEGIN
 
-  IF table_count < 0 THEN
-          RAISE EXCEPTION 'Таблица \"%\" не найдена!', t;
-  ELSE
-
-  FOR col in schema_tab
-              LOOP
-                  RAISE NOTICE '%', col.nspname;
-  END LOOP;
           RAISE NOTICE ' ';
-  END IF;
-  END
+          RAISE NOTICE 'Пользователь: %', user;
+          RAISE NOTICE 'Таблица: %', '$1';
+          RAISE NOTICE ' ';
+          RAISE NOTICE 'No.  Имя столбца      Атрибуты';
+          RAISE NOTICE '---  --------------   -------------------------------------------------';
+
+          FOR col IN new_tab
+              LOOP
+                  RAISE NOTICE '% % Type    : %', RPAD(col.attnum::text, 5, ' '), RPAD(col.attname, 16, ' '), col.typname;
+                  IF col.confrelid != 0 THEN
+                      RAISE NOTICE '% %', RPAD('⠀', 22, ' '),concat('Constr  : ', col.conname::text, ' References ', get_name_by_oid(col.confrelid::INT));
+                  END IF;
+                  RAISE NOTICE ' ';
+              END LOOP;
+      END;
   \$\$ LANGUAGE plpgsql;
-
-
-  " > .file3.sql
-  echo "SELECT schemas_table('$1');" > .file4.sql
-  psql -U $USER -h pg -d studs -f .file3.sql
-  psql -U $USER -h pg -d studs -f .file4.sql 2>&1  | sed -e "s|.*NOTICE: ||g" | tail +3 | head -n +3
+  " > .table_info.sql
 
 }
+
+function table_info() {
+  psql -U $USER -h pg -d studs -f .table_info.sql 2>&1 | sed -e "s|.*NOTICE: ||g"
+}
+
+function find_schemas_by_tablename() {
+    echo "
+    CREATE OR REPLACE FUNCTION schemas_table(t text)
+        RETURNS VOID AS
+    \$\$
+    DECLARE
+        schema_tab CURSOR FOR (
+            SELECT tab.relname, space.nspname FROM pg_class tab
+                   JOIN pg_namespace space on tab.relnamespace = space.oid
+            WHERE (tab.relname = t)
+            ORDER BY space.nspname
+        );
+        table_count int;
+    BEGIN
+
+        SELECT COUNT(DISTINCT nspname) INTO table_count FROM pg_class tab
+            JOIN pg_namespace space on tab.relnamespace = space.oid
+        WHERE relname = t;
+
+        IF table_count < 0 THEN
+            RAISE EXCEPTION 'Таблица "%" не найдена!', t;
+        ELSE
+            RAISE NOTICE ' ';
+            RAISE NOTICE 'Схемы, где есть таблица %: ', t;
+
+            FOR col in schema_tab
+                LOOP
+                    RAISE NOTICE '%', col.nspname;
+                END LOOP;
+            RAISE NOTICE ' ';
+        END IF;
+    END
+    \$\$ LANGUAGE plpgsql;
+
+    select * from schemas_table('$1');
+    " > .find_schemas.sql
+}
+
+function find_schemas() {
+  psql -U $USER -h pg -d studs -f .find_schemas.sql 2>&1 | sed -e "s|.*NOTICE: ||g"
+}
+
 function clean_temp_files() {
-  rm .file*.sql
+  rm .*.sql 2>/dev/null 1>/dev/null
+  echo
 }
 
-##################
-###   script   ###
-##################
+######################################################
+#####################   script   #####################
+######################################################
 
 while getopts ":h" option; do
   # shellcheck disable=SC2220
@@ -121,30 +148,20 @@ then
   IFS='.'
   read -a str <<< "$1"
 
-  echo "Пользователь: $USER"
-
   if [ ${#str[@]} -eq 1 ]; then
-      echo "Таблица: $1"
-      write_file_to_find_table $1
-      get_schemas_names $1
-      schemas="{$(execute_psql_commands $1)}"
-      echo "$schemas"
-
+      echo "Пожалуйста укажите схему БД в вормате SCHEMA.TABLE"
+      echo "Можете попробовать одну из представленых:"
+      find_schemas_by_tablename $1
+      find_schemas
 
   elif [ ${#str[@]} -eq 2 ]; then
       echo -e "Схема:\t${str[0]}"
       echo -e "Таблица:\t${str[1]}"
+      tableinfo_by_tablename ${str[1]}
+      table_info
 
-
-  elif [ ${#str[@]} -eq 3 ]; then
-      echo -e "БД:\t${str[0]}"
-      echo -e "Схема:\t${str[1]}"
-      echo -e "Таблица:\t${str[2]}"
-
-  elif [ ${#str[@]} -gt 3 ]; then
-      echo "Слишком длинная последовательность"
-
-
+  elif [ ${#str[@]} -gt 2 ]; then
+      echo "Некорректный ввод"
   fi
 clean_temp_files
 else
